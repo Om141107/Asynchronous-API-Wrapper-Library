@@ -1,0 +1,76 @@
+import aiohttp
+import asyncio
+from typing import Any, Dict, Optional, List
+
+
+class RateLimiter:
+    """Simple async rate limiter using a semaphore."""
+    def __init__(self, max_calls: int, period: float):
+        self._semaphore = asyncio.Semaphore(max_calls)
+        self._period = period
+
+    async def acquire(self):
+        await self._semaphore.acquire()
+        asyncio.create_task(self._release())
+
+    async def _release(self):
+        await asyncio.sleep(self._period)
+        self._semaphore.release()
+
+
+class AsyncAPIWrapper:
+    def __init__(self, base_url: str, api_key: Optional[str] = None,
+                 max_calls: int = 5, period: float = 1.0):
+        self.base_url = base_url
+        self.api_key = api_key
+        self.session: Optional[aiohttp.ClientSession] = None
+        self.rate_limiter = RateLimiter(max_calls, period)
+
+    async def __aenter__(self):
+        self.session = aiohttp.ClientSession()
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        if self.session:
+            await self.session.close()
+
+    async def _request(self, method: str, endpoint: str, **kwargs) -> Dict[str, Any]:
+        await self.rate_limiter.acquire()
+        url = f"{self.base_url}{endpoint}"
+        headers = kwargs.pop("headers", {})
+
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+
+        try:
+            async with self.session.request(method, url, headers=headers, **kwargs) as response:
+                response.raise_for_status()
+                return await response.json()
+        except aiohttp.ClientError as e:
+            return {"error": str(e)}
+
+    async def get(self, endpoint: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        return await self._request("GET", endpoint, params=params)
+
+    async def post(self, endpoint: str, data: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        return await self._request("POST", endpoint, json=data)
+
+
+# Example usage
+async def main():
+    async with AsyncAPIWrapper("https://jsonplaceholder.typicode.com", max_calls=2, period=1.0) as api:
+        # Run multiple requests concurrently
+        tasks: List[asyncio.Task] = [
+            api.get("/posts/1"),
+            api.get("/posts/2"),
+            api.get("/posts/3"),
+            api.get("/posts/4"),
+        ]
+
+        results = await asyncio.gather(*tasks)
+        for i, result in enumerate(results, start=1):
+            print(f"Result {i}: {result}")
+
+        # Example POST request
+        new_post = await api.post("/posts", {"title": "Async Test", "body": "Hello World", "userId": 1})
+        print("Created post:", new_post)
